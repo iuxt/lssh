@@ -18,6 +18,12 @@ type menuItem struct {
 	selected bool
 }
 
+type menuState struct {
+	current    int
+	searchMode bool
+	query      string
+}
+
 func chooseSourceInteractive(sources []ConfigSource) (ConfigSource, error) {
 	items := make([]menuItem, 0, len(sources))
 	for _, source := range sources {
@@ -77,10 +83,10 @@ func runMenu(title string, items []menuItem) (int, error) {
 	defer term.Restore(fd, oldState)
 
 	reader := bufio.NewReader(os.Stdin)
-	current := 0
+	state := menuState{}
 	for i, item := range items {
 		if item.selected {
-			current = i
+			state.current = i
 			break
 		}
 	}
@@ -89,44 +95,96 @@ func runMenu(title string, items []menuItem) (int, error) {
 	defer showCursor()
 
 	for {
-		renderMenu(title, items, current)
-		key, err := readMenuKey(reader)
+		filtered, visibleIndexes := filteredMenuItems(items, state.query)
+		if len(filtered) == 0 {
+			state.current = 0
+		} else if state.current >= len(filtered) {
+			state.current = len(filtered) - 1
+		}
+
+		renderMenu(title, filtered, state)
+		key, text, err := readMenuKey(reader, state.searchMode)
 		if err != nil {
 			return -1, err
 		}
 
 		switch key {
 		case "up":
-			if current > 0 {
-				current--
+			if len(filtered) == 0 {
+				continue
+			}
+			if state.current > 0 {
+				state.current--
 			} else {
-				current = len(items) - 1
+				state.current = len(filtered) - 1
 			}
 		case "down":
-			if current < len(items)-1 {
-				current++
+			if len(filtered) == 0 {
+				continue
+			}
+			if state.current < len(filtered)-1 {
+				state.current++
 			} else {
-				current = 0
+				state.current = 0
 			}
 		case "enter":
+			if state.searchMode {
+				state.searchMode = false
+				continue
+			}
+			if len(filtered) == 0 {
+				continue
+			}
 			clearScreen()
-			return current, nil
+			return visibleIndexes[state.current], nil
 		case "cancel":
+			if state.searchMode {
+				state.searchMode = false
+				state.query = ""
+				state.current = 0
+				continue
+			}
 			clearScreen()
 			return -1, errSelectionCanceled
+		case "search":
+			state.searchMode = true
+		case "backspace":
+			if state.searchMode && len(state.query) > 0 {
+				state.query = state.query[:len(state.query)-1]
+				state.current = 0
+			}
+		case "text":
+			if state.searchMode {
+				state.query += text
+				state.current = 0
+			}
 		}
 	}
 }
 
-func renderMenu(title string, items []menuItem, current int) {
+func renderMenu(title string, items []menuItem, state menuState) {
 	clearScreen()
 	writeMenuLine(title)
-	writeMenuLine("Use ↑/↓ or j/k to move, Enter to confirm, q to quit.")
+	writeMenuLine("Use ↑/↓ or j/k to move, / to search, Enter to confirm, q to quit.")
 	writeMenuLine("")
+
+	if state.searchMode {
+		writeMenuLine("Search: /" + state.query)
+	} else if state.query != "" {
+		writeMenuLine("Filter: /" + state.query)
+	} else {
+		writeMenuLine("")
+	}
+	writeMenuLine("")
+
+	if len(items) == 0 {
+		writeMenuLine("  No matches")
+		return
+	}
 
 	for i, item := range items {
 		cursor := "  "
-		if i == current {
+		if i == state.current {
 			cursor = "> "
 		}
 		writeMenuLine(cursor + item.title)
@@ -136,44 +194,93 @@ func renderMenu(title string, items []menuItem, current int) {
 	}
 }
 
-func readMenuKey(reader *bufio.Reader) (string, error) {
+func readMenuKey(reader *bufio.Reader, searchMode bool) (string, string, error) {
 	b, err := reader.ReadByte()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	switch b {
 	case '\r', '\n':
-		return "enter", nil
+		return "enter", "", nil
 	case 'k', 'K':
-		return "up", nil
+		if searchMode {
+			return "text", string(b), nil
+		}
+		return "up", "", nil
 	case 'j', 'J':
-		return "down", nil
+		if searchMode {
+			return "text", string(b), nil
+		}
+		return "down", "", nil
+	case '/':
+		if searchMode {
+			return "text", "/", nil
+		}
+		return "search", "", nil
 	case 'q', 'Q', 0x03:
-		return "cancel", nil
+		if searchMode && b != 0x03 {
+			return "text", string(b), nil
+		}
+		return "cancel", "", nil
+	case 0x7f, 0x08:
+		if searchMode {
+			return "backspace", "", nil
+		}
+		return "", "", nil
 	case 0x1b:
 		next, err := reader.ReadByte()
 		if err != nil {
-			return "cancel", nil
+			if searchMode {
+				return "cancel", "", nil
+			}
+			return "cancel", "", nil
 		}
 		if next != '[' {
-			return "cancel", nil
+			if searchMode {
+				return "cancel", "", nil
+			}
+			return "cancel", "", nil
 		}
 		arrow, err := reader.ReadByte()
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		switch arrow {
 		case 'A':
-			return "up", nil
+			return "up", "", nil
 		case 'B':
-			return "down", nil
+			return "down", "", nil
 		default:
-			return "", nil
+			return "", "", nil
 		}
 	default:
-		return "", nil
+		if searchMode && b >= 0x20 && b != 0x7f {
+			return "text", string(b), nil
+		}
+		return "", "", nil
 	}
+}
+
+func filteredMenuItems(items []menuItem, query string) ([]menuItem, []int) {
+	if strings.TrimSpace(query) == "" {
+		indexes := make([]int, len(items))
+		for i := range items {
+			indexes[i] = i
+		}
+		return items, indexes
+	}
+
+	query = strings.ToLower(query)
+	filtered := make([]menuItem, 0, len(items))
+	indexes := make([]int, 0, len(items))
+	for i, item := range items {
+		if strings.Contains(strings.ToLower(item.title), query) || strings.Contains(strings.ToLower(item.details), query) {
+			filtered = append(filtered, item)
+			indexes = append(indexes, i)
+		}
+	}
+	return filtered, indexes
 }
 
 func clearScreen() {
