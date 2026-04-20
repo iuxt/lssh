@@ -59,9 +59,14 @@ func RunSSHClient(profileName string, profile SSHProfile) error {
 		return err
 	}
 
+	authMethods, err := buildAuthMethods(profile)
+	if err != nil {
+		return err
+	}
+
 	sshConfig := &ssh.ClientConfig{
 		User:            profile.User,
-		Auth:            []ssh.AuthMethod{ssh.Password(profile.Password)},
+		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         10 * time.Second,
 	}
@@ -152,6 +157,59 @@ func RunSSHClient(profileName string, profile SSHProfile) error {
 	}
 
 	return nil
+}
+
+func buildAuthMethods(profile SSHProfile) ([]ssh.AuthMethod, error) {
+	var methods []ssh.AuthMethod
+
+	if strings.TrimSpace(profile.PrivateKey) != "" || strings.TrimSpace(profile.PrivateKeyPath) != "" {
+		signer, err := loadPrivateKeySigner(profile)
+		if err != nil {
+			return nil, err
+		}
+		methods = append(methods, ssh.PublicKeys(signer))
+	}
+
+	if profile.Password != "" {
+		methods = append(methods, ssh.Password(profile.Password))
+	}
+
+	if len(methods) == 0 {
+		return nil, errors.New("no ssh auth method configured; set password or private_key/private_key_path")
+	}
+
+	return methods, nil
+}
+
+func loadPrivateKeySigner(profile SSHProfile) (ssh.Signer, error) {
+	var keyData []byte
+	if strings.TrimSpace(profile.PrivateKey) != "" {
+		keyData = []byte(profile.PrivateKey)
+	} else {
+		expandedPath, err := expandHome(profile.PrivateKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(expandedPath)
+		if err != nil {
+			return nil, fmt.Errorf("read private key %s: %w", expandedPath, err)
+		}
+		keyData = data
+	}
+
+	if profile.PrivateKeyPassphrase != "" {
+		signer, err := ssh.ParsePrivateKeyWithPassphrase(keyData, []byte(profile.PrivateKeyPassphrase))
+		if err != nil {
+			return nil, fmt.Errorf("parse private key with passphrase: %w", err)
+		}
+		return signer, nil
+	}
+
+	signer, err := ssh.ParsePrivateKey(keyData)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+	return signer, nil
 }
 
 func buildHostKeyCallback(profile SSHProfile) (ssh.HostKeyCallback, error) {

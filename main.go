@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -12,14 +14,16 @@ func main() {
 	var listProfiles bool
 	var showExample bool
 
-	flag.StringVar(&configPath, "config", "", "path to config file, default is ~/.lssh.yaml")
+	flag.StringVar(&configPath, "config", "", "config file or directory; defaults to ~/.lssh.{json,yaml,yml} and ~/.config/lssh")
 	flag.BoolVar(&listProfiles, "list", false, "list configured profiles")
 	flag.BoolVar(&showExample, "example-config", false, "print an example config file")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [flags] [profile]\n\n", os.Args[0])
 		fmt.Fprintln(flag.CommandLine.Output(), "Examples:")
+		fmt.Fprintf(flag.CommandLine.Output(), "  %s\n", os.Args[0])
 		fmt.Fprintf(flag.CommandLine.Output(), "  %s dev\n", os.Args[0])
-		fmt.Fprintf(flag.CommandLine.Output(), "  %s -config ./lssh.yaml dev\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "  %s -config ~/.config/lssh\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "  %s -config ./servers.yaml dev\n", os.Args[0])
 		fmt.Fprintf(flag.CommandLine.Output(), "  %s -list\n\n", os.Args[0])
 		fmt.Fprintln(flag.CommandLine.Output(), "Interactive transfer tips:")
 		fmt.Fprintln(flag.CommandLine.Output(), "  remote download: type `sz <remote-file>` on the server")
@@ -35,16 +39,14 @@ func main() {
 		return
 	}
 
-	cfg, err := loadConfig(configPath)
+	sources, err := loadConfigSources(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
 		os.Exit(1)
 	}
 
 	if listProfiles {
-		for name, profile := range cfg.Profiles {
-			fmt.Printf("%s\t%s@%s:%d\n", name, profile.User, profile.Host, profile.Port)
-		}
+		printProfiles(sources)
 		return
 	}
 
@@ -53,31 +55,86 @@ func main() {
 		profileName = strings.TrimSpace(flag.Arg(0))
 	}
 
-	profile, resolvedName, err := selectProfile(cfg, profileName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "select profile failed: %v\n", err)
-		os.Exit(1)
+	var (
+		source       ConfigSource
+		profile      SSHProfile
+		resolvedName string
+	)
+
+	if profileName != "" {
+		source, profile, resolvedName, err = selectProfileAcrossSources(sources, profileName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "select profile failed: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		source, profile, resolvedName, err = chooseInteractiveTarget(sources)
+		if err != nil {
+			msg := selectionErrorMessage(err)
+			if msg == "" {
+				msg = err.Error()
+			}
+			if errors.Is(err, errSelectionCanceled) {
+				fmt.Fprintln(os.Stderr, msg)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "select profile failed: %s\n", msg)
+			os.Exit(1)
+		}
 	}
 
+	fmt.Fprintf(os.Stderr, "connecting to %s from %s...\n", resolvedName, source.Path)
 	if err := RunSSHClient(resolvedName, profile); err != nil {
 		fmt.Fprintf(os.Stderr, "ssh session failed: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func exampleConfig() string {
-	return `{
-  "default_profile": "dev",
-  "profiles": {
-    "dev": {
-      "host": "192.168.1.100",
-      "port": 22,
-      "user": "root",
-      "password": "your-password",
-      "known_hosts": "~/.ssh/known_hosts",
-      "insecure_ignore_host_key": true
-    }
-  }
+func printProfiles(sources []ConfigSource) {
+	type row struct {
+		source string
+		name   string
+		target string
+	}
+
+	var rows []row
+	for _, source := range sources {
+		for _, name := range sortedProfileNames(source.Config) {
+			profile := source.Config.Profiles[name]
+			rows = append(rows, row{
+				source: source.Path,
+				name:   name,
+				target: fmt.Sprintf("%s@%s:%d", profile.User, profile.Host, profile.Port),
+			})
+		}
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].source == rows[j].source {
+			return rows[i].name < rows[j].name
+		}
+		return rows[i].source < rows[j].source
+	})
+
+	for _, row := range rows {
+		fmt.Printf("%s\t%s\t%s\n", row.source, row.name, row.target)
+	}
 }
+
+func exampleConfig() string {
+	return `default_profile: dev
+profiles:
+  dev:
+    host: 192.168.1.100
+    port: 22
+    user: root
+    private_key_path: ~/.ssh/id_ed25519
+    known_hosts: ~/.ssh/known_hosts
+
+  prod:
+    host: 10.0.0.10
+    user: deploy
+    password: your-password
+    insecure_ignore_host_key: false
 `
 }
