@@ -10,11 +10,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/term"
@@ -245,10 +247,31 @@ func (s *sessionState) handleLocalByte(b byte) error {
 		return nil
 	}
 
+	triggerRemoteUpload := s.isRemoteUploadSubmitLocked(b)
+
 	if err := s.writeRemoteLocked([]byte{b}); err != nil {
 		return err
 	}
 	s.trackLineLocked(b)
+
+	if triggerRemoteUpload {
+		files, err := chooseUploadFiles()
+		if err != nil {
+			s.cancelRemoteUploadLocked()
+			if errors.Is(err, errFileSelectionCanceled) {
+				_, _ = os.Stderr.WriteString("\r\nfile selection canceled.\r\n")
+				return nil
+			}
+			return err
+		}
+		if len(files) == 0 {
+			s.cancelRemoteUploadLocked()
+			_, _ = os.Stderr.WriteString("\r\nno files selected.\r\n")
+			return nil
+		}
+		s.transferRequested = transferUpload
+		s.uploadFiles = files
+	}
 	return nil
 }
 
@@ -275,8 +298,22 @@ func (s *sessionState) handleEscapeByteLocked(b byte) error {
 			_, _ = os.Stderr.WriteString("\r\nstarting remote rz...\r\n")
 			return s.writeRemoteLocked([]byte("rz\n"))
 		case line == "~rz":
-			_, _ = os.Stderr.WriteString("\r\nusage: ~rz <local-file> [more-files...]\r\n")
-			return nil
+			files, err := chooseUploadFiles()
+			if err != nil {
+				if errors.Is(err, errFileSelectionCanceled) {
+					_, _ = os.Stderr.WriteString("\r\nfile selection canceled.\r\n")
+					return nil
+				}
+				return err
+			}
+			if len(files) == 0 {
+				_, _ = os.Stderr.WriteString("\r\nno files selected.\r\n")
+				return nil
+			}
+			s.transferRequested = transferUpload
+			s.uploadFiles = files
+			_, _ = os.Stderr.WriteString("\r\nstarting remote rz...\r\n")
+			return s.writeRemoteLocked([]byte("rz\n"))
 		default:
 			return s.writeRemoteLocked(s.escapeBufferWithNewline(line))
 		}
@@ -298,6 +335,19 @@ func (s *sessionState) writeRemoteLocked(p []byte) error {
 	return err
 }
 
+func (s *sessionState) cancelRemoteUploadLocked() {
+	s.transferRequested = transferNone
+	s.uploadFiles = nil
+	_ = s.writeRemoteLocked([]byte{0x03})
+}
+
+func (s *sessionState) isRemoteUploadSubmitLocked(b byte) bool {
+	if b != '\r' && b != '\n' {
+		return false
+	}
+	return isRemoteUploadCommand(strings.TrimSpace(string(s.lineBuffer)))
+}
+
 func (s *sessionState) trackLineLocked(b byte) {
 	switch b {
 	case '\r', '\n':
@@ -306,6 +356,8 @@ func (s *sessionState) trackLineLocked(b byte) {
 		s.lineBuffer = s.lineBuffer[:0]
 		if strings.HasPrefix(line, "sz ") || line == "sz" {
 			s.transferRequested = transferDownload
+		} else if isRemoteUploadCommand(line) {
+			s.transferRequested = transferUpload
 		} else {
 			s.transferRequested = transferNone
 			s.uploadFiles = nil
@@ -370,6 +422,7 @@ func (s *sessionState) startTransferLocked() error {
 	}
 
 	var cmd *exec.Cmd
+	var progressOut *progressOutput
 	switch s.transferRequested {
 	case transferUpload:
 		if len(s.uploadFiles) == 0 {
@@ -394,10 +447,19 @@ func (s *sessionState) startTransferLocked() error {
 		defer s.mu.Unlock()
 		return s.remoteInput.Write(p)
 	})
-	cmd.Stderr = os.Stderr
+	progressOut, err = attachProgressOutput(cmd, os.Stderr)
+	if err != nil {
+		return err
+	}
 
 	if err := cmd.Start(); err != nil {
+		if progressOut != nil {
+			progressOut.close()
+		}
 		return fmt.Errorf("start local %s: %w", cmd.Path, err)
+	}
+	if progressOut != nil {
+		progressOut.afterStart()
 	}
 
 	transfer := &zmodemTransfer{
@@ -413,6 +475,9 @@ func (s *sessionState) startTransferLocked() error {
 	go func() {
 		err := cmd.Wait()
 		_ = in.Close()
+		if progressOut != nil {
+			progressOut.close()
+		}
 		transfer.done <- err
 	}()
 
@@ -451,4 +516,95 @@ type writerFunc func(p []byte) (int, error)
 
 func (w writerFunc) Write(p []byte) (int, error) {
 	return w(p)
+}
+
+var errFileSelectionCanceled = errors.New("file selection canceled")
+
+type progressOutput struct {
+	ptmx io.ReadCloser
+	tty  io.Closer
+}
+
+func (p *progressOutput) afterStart() {
+	if p != nil && p.tty != nil {
+		_ = p.tty.Close()
+		p.tty = nil
+	}
+}
+
+func (p *progressOutput) close() {
+	if p == nil {
+		return
+	}
+	if p.tty != nil {
+		_ = p.tty.Close()
+		p.tty = nil
+	}
+	if p.ptmx != nil {
+		_ = p.ptmx.Close()
+		p.ptmx = nil
+	}
+}
+
+func attachProgressOutput(cmd *exec.Cmd, dst io.Writer) (*progressOutput, error) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open progress pty: %w", err)
+	}
+
+	cmd.Stderr = tty
+
+	go func() {
+		_, _ = io.Copy(dst, ptmx)
+		_ = ptmx.Close()
+	}()
+	return &progressOutput{ptmx: ptmx, tty: tty}, nil
+}
+
+func isRemoteUploadCommand(line string) bool {
+	return line == "rz" || strings.HasPrefix(line, "rz ")
+}
+
+func chooseUploadFiles() ([]string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return chooseUploadFilesDarwin()
+	default:
+		return nil, fmt.Errorf("file picker for ~rz is not supported on %s yet; use ~rz <local-file> instead", runtime.GOOS)
+	}
+}
+
+func chooseUploadFilesDarwin() ([]string, error) {
+	script := `
+set selectedFiles to choose file with prompt "Select files to upload" with multiple selections allowed
+set oldDelims to AppleScript's text item delimiters
+set AppleScript's text item delimiters to linefeed
+set posixPaths to {}
+repeat with selectedFile in selectedFiles
+	set end of posixPaths to POSIX path of selectedFile
+end repeat
+set outputText to posixPaths as text
+set AppleScript's text item delimiters to oldDelims
+return outputText
+`
+
+	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if strings.Contains(msg, "User canceled") || strings.Contains(msg, "User cancelled") {
+			return nil, errFileSelectionCanceled
+		}
+		return nil, fmt.Errorf("open file picker: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	files := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		files = append(files, line)
+	}
+	return files, nil
 }

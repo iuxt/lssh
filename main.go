@@ -23,7 +23,7 @@ func main() {
 		fmt.Fprintf(flag.CommandLine.Output(), "  %s -list\n\n", os.Args[0])
 		fmt.Fprintln(flag.CommandLine.Output(), "Interactive transfer tips:")
 		fmt.Fprintln(flag.CommandLine.Output(), "  remote download: type `sz <remote-file>` on the server")
-		fmt.Fprintln(flag.CommandLine.Output(), "  local upload:   type `~rz <local-file> [more-files...]` at the start of a line")
+		fmt.Fprintln(flag.CommandLine.Output(), "  local upload:   type `~rz` to choose local files, or `~rz <local-file> [more-files...]`")
 		fmt.Fprintln(flag.CommandLine.Output(), "  disconnect:     type `~.` at the start of a line")
 		fmt.Fprintln(flag.CommandLine.Output())
 		flag.PrintDefaults()
