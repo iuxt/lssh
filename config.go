@@ -25,9 +25,9 @@ type SSHProfile struct {
 func defaultConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".tssh.json"
+		return ".lssh.json"
 	}
-	return filepath.Join(home, ".tssh.json")
+	return filepath.Join(home, ".lssh.json")
 }
 
 func loadConfig(path string) (*Config, error) {

@@ -12,14 +12,14 @@ func main() {
 	var listProfiles bool
 	var showExample bool
 
-	flag.StringVar(&configPath, "config", "", "path to config file, default is ~/.tssh.yaml")
+	flag.StringVar(&configPath, "config", "", "path to config file, default is ~/.lssh.yaml")
 	flag.BoolVar(&listProfiles, "list", false, "list configured profiles")
 	flag.BoolVar(&showExample, "example-config", false, "print an example config file")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [flags] [profile]\n\n", os.Args[0])
 		fmt.Fprintln(flag.CommandLine.Output(), "Examples:")
 		fmt.Fprintf(flag.CommandLine.Output(), "  %s dev\n", os.Args[0])
-		fmt.Fprintf(flag.CommandLine.Output(), "  %s -config ./tssh.yaml dev\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "  %s -config ./lssh.yaml dev\n", os.Args[0])
 		fmt.Fprintf(flag.CommandLine.Output(), "  %s -list\n\n", os.Args[0])
 		fmt.Fprintln(flag.CommandLine.Output(), "Interactive transfer tips:")
 		fmt.Fprintln(flag.CommandLine.Output(), "  remote download: type `sz <remote-file>` on the server")
