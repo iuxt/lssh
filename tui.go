@@ -120,18 +120,18 @@ func runMenu(title string, items []menuItem) (int, error) {
 
 func renderMenu(title string, items []menuItem, current int) {
 	clearScreen()
-	fmt.Fprintf(os.Stdout, "%s\n", title)
-	fmt.Fprintln(os.Stdout, "Use ↑/↓ or j/k to move, Enter to confirm, q to quit.")
-	fmt.Fprintln(os.Stdout)
+	writeMenuLine(title)
+	writeMenuLine("Use ↑/↓ or j/k to move, Enter to confirm, q to quit.")
+	writeMenuLine("")
 
 	for i, item := range items {
 		cursor := "  "
 		if i == current {
 			cursor = "> "
 		}
-		fmt.Fprintf(os.Stdout, "%s%s\n", cursor, item.title)
+		writeMenuLine(cursor + item.title)
 		if item.details != "" {
-			fmt.Fprintf(os.Stdout, "  %s\n", item.details)
+			writeMenuLine("    " + item.details)
 		}
 	}
 }
@@ -178,6 +178,10 @@ func readMenuKey(reader *bufio.Reader) (string, error) {
 
 func clearScreen() {
 	fmt.Fprint(os.Stdout, "\x1b[2J\x1b[H")
+}
+
+func writeMenuLine(line string) {
+	fmt.Fprintf(os.Stdout, "%s\r\n", line)
 }
 
 func hideCursor() {
