@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/term"
@@ -480,7 +479,6 @@ func (s *sessionState) startTransferLocked() error {
 	}
 
 	var cmd *exec.Cmd
-	var progressOut *progressOutput
 	switch s.transferRequested {
 	case transferUpload:
 		if len(s.uploadFiles) == 0 {
@@ -505,19 +503,10 @@ func (s *sessionState) startTransferLocked() error {
 		defer s.mu.Unlock()
 		return s.remoteInput.Write(p)
 	})
-	progressOut, err = attachProgressOutput(cmd, os.Stderr)
-	if err != nil {
-		return err
-	}
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		if progressOut != nil {
-			progressOut.close()
-		}
 		return fmt.Errorf("start local %s: %w", cmd.Path, err)
-	}
-	if progressOut != nil {
-		progressOut.afterStart()
 	}
 
 	transfer := &zmodemTransfer{
@@ -533,9 +522,6 @@ func (s *sessionState) startTransferLocked() error {
 	go func() {
 		err := cmd.Wait()
 		_ = in.Close()
-		if progressOut != nil {
-			progressOut.close()
-		}
 		transfer.done <- err
 	}()
 
@@ -577,47 +563,6 @@ func (w writerFunc) Write(p []byte) (int, error) {
 }
 
 var errFileSelectionCanceled = errors.New("file selection canceled")
-
-type progressOutput struct {
-	ptmx io.ReadCloser
-	tty  io.Closer
-}
-
-func (p *progressOutput) afterStart() {
-	if p != nil && p.tty != nil {
-		_ = p.tty.Close()
-		p.tty = nil
-	}
-}
-
-func (p *progressOutput) close() {
-	if p == nil {
-		return
-	}
-	if p.tty != nil {
-		_ = p.tty.Close()
-		p.tty = nil
-	}
-	if p.ptmx != nil {
-		_ = p.ptmx.Close()
-		p.ptmx = nil
-	}
-}
-
-func attachProgressOutput(cmd *exec.Cmd, dst io.Writer) (*progressOutput, error) {
-	ptmx, tty, err := pty.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open progress pty: %w", err)
-	}
-
-	cmd.Stderr = tty
-
-	go func() {
-		_, _ = io.Copy(dst, ptmx)
-		_ = ptmx.Close()
-	}()
-	return &progressOutput{ptmx: ptmx, tty: tty}, nil
-}
 
 func isRemoteUploadCommand(line string) bool {
 	return line == "rz" || strings.HasPrefix(line, "rz ")
