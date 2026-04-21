@@ -488,7 +488,7 @@ func (s *sessionState) startTransferLocked() error {
 		cmd = exec.Command("sz", args...)
 		_, _ = os.Stderr.WriteString("\r\nuploading via local sz...\r\n")
 	case transferDownload:
-		cmd = exec.Command("rz", "-E", "-y", "-b")
+		cmd = exec.Command("rz", "-e", "-E", "-y", "-b")
 		_, _ = os.Stderr.WriteString("\r\nreceiving via local rz...\r\n")
 	default:
 		return nil
